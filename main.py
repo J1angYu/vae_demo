@@ -1,5 +1,6 @@
 import argparse
 import os
+import math
 
 import torch
 from torch import nn, optim
@@ -39,7 +40,7 @@ device = torch.device("cuda" if args.cuda else "cpu")
 
 # 3.1 VAE for MNIST (Binary Likelihood)
 class VAE_Binary(nn.Module):
-    def __init__(self, input_dim=784, h_dim=400, z_dim=20):
+    def __init__(self, input_dim=784, h_dim=400, z_dim=4):
         super(VAE_Binary, self).__init__()
         self.fc1 = nn.Linear(input_dim, h_dim)
         self.fc21 = nn.Linear(h_dim, z_dim)
@@ -67,13 +68,14 @@ class VAE_Binary(nn.Module):
 
 # 3.2 VAE for Frey Face (Gaussian Likelihood)
 class VAE_Gaussian(nn.Module):
-    def __init__(self, input_dim=560, h_dim=200, z_dim=30):
+    def __init__(self, input_dim=560, h_dim=200, z_dim=4):
         super(VAE_Gaussian, self).__init__()
         self.fc1 = nn.Linear(input_dim, h_dim)
         self.fc21 = nn.Linear(h_dim, z_dim)
         self.fc22 = nn.Linear(h_dim, z_dim)
         self.fc3 = nn.Linear(z_dim, h_dim)
-        self.fc4 = nn.Linear(h_dim, input_dim)
+        self.fc41 = nn.Linear(h_dim, input_dim)  # for mean
+        self.fc42 = nn.Linear(h_dim, input_dim)  # for log-variance
 
     def encode(self, x):
         h1 = F.relu(self.fc1(x))
@@ -86,7 +88,9 @@ class VAE_Gaussian(nn.Module):
 
     def decode(self, z):
         h3 = F.relu(self.fc3(z))
-        return self.fc4(h3)
+        recon_mean = self.fc41(h3)
+        recon_logvar = self.fc42(h3)
+        return recon_mean, recon_logvar
 
     def forward(self, x):
         mu, logvar = self.encode(x.view(-1, 560))
@@ -100,10 +104,13 @@ def loss_function_bce(recon_x, x, mu, logvar, beta=1.0):
     KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return BCE + beta * KLD
 
-def loss_function_mse(recon_x, x, mu, logvar, beta=1.0):
-    MSE = F.mse_loss(recon_x, x.view(-1, 560), reduction='sum')
+def loss_function_gaussian(recon_x_mean, recon_x_logvar, x, mu, logvar, beta=1.0):
+    x = x.view(-1, 560)
+    recon_loss = 0.5 * torch.sum(
+        math.log(2 * math.pi) + recon_x_logvar + torch.pow(x - recon_x_mean, 2) / torch.exp(recon_x_logvar)
+    )
     KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    return MSE + beta * KLD
+    return recon_loss + beta * KLD
 
 # --- 5. 主执行函数 ---
 def main():
@@ -122,7 +129,7 @@ def main():
         datasets.MNIST('../data', train=False, transform=transforms.ToTensor()),
         batch_size=args.batch_size, shuffle=False)
 
-    model_mnist = VAE_Binary().to(device)
+    model_mnist = VAE_Binary(z_dim=4).to(device)
     optimizer_mnist = optim.Adam(model_mnist.parameters(), lr=args.lr)
 
     for epoch in range(1, args.epochs_mnist + 1):
@@ -149,8 +156,8 @@ def main():
     frey_faces_tensor = torch.from_numpy(frey_faces)
     frey_dataset = TensorDataset(frey_faces_tensor)
     frey_loader = DataLoader(frey_dataset, batch_size=args.batch_size, shuffle=True)
-    
-    model_frey = VAE_Gaussian().to(device)
+
+    model_frey = VAE_Gaussian(z_dim=4).to(device)
     optimizer_frey = optim.Adam(model_frey.parameters(), lr=args.lr)
     
     for epoch in range(1, args.epochs_frey + 1):
@@ -159,8 +166,8 @@ def main():
         for batch_idx, (data,) in enumerate(frey_loader):
             data = data.to(device)
             optimizer_frey.zero_grad()
-            recon_batch, mu, logvar = model_frey(data)
-            loss = loss_function_mse(recon_batch, data, mu, logvar)
+            (recon_mean, recon_logvar), mu, logvar = model_frey(data)
+            loss = loss_function_gaussian(recon_mean, recon_logvar, data, mu, logvar)
             loss.backward()
             train_loss += loss.item()
             optimizer_frey.step()
@@ -169,8 +176,10 @@ def main():
             print(f'====> Epoch: {epoch} Average loss: {train_loss / len(frey_loader.dataset):.4f}')
 
 
-  # --- 可视化 ---
+    # --- 可视化 ---
     print("\n--- Visualization (Original, Reconstruction, Residual) ---")
+    model_mnist.eval()
+    model_frey.eval()
 
     # MNIST 结果可视化
     data_batch, _ = next(iter(mnist_test_loader))
@@ -191,9 +200,10 @@ def main():
     data_batch, = next(iter(frey_loader))
     indices = torch.randperm(data_batch.size(0))[:10]
     samples_X = data_batch[indices].to(device)
-    recon_X, _, _ = model_frey(samples_X)
+    (recon_X_mean, _), _, _ = model_frey(samples_X)
     img_shape = (28, 20)
-    recon_X_reshaped = recon_X.view(10, 1, *img_shape)
+    recon_X_reshaped = recon_X_mean.view(10, 1, *img_shape)
+    
     residual = torch.abs(samples_X.view(10, 1, *img_shape) - recon_X_reshaped)
     comparison = torch.cat([samples_X.view(10, 1, *img_shape),
                             recon_X_reshaped,
@@ -202,6 +212,26 @@ def main():
                'results_freyface/reconstruction_comparison.png',
                nrow=10)
     print("Saved Frey Face originals, reconstructions, and residuals to 'results_freyface/reconstruction_comparison.png'")
+
+    # 潜在空间采样生成结果可视化
+    print("\n--- Visualization (Generated Samples) ---")
+    with torch.no_grad():
+        # MNIST generated samples
+        z_dim_mnist = 4
+        sample_z_mnist = torch.randn(64, z_dim_mnist).to(device)
+        generated_mnist = model_mnist.decode(sample_z_mnist).cpu()
+        save_image(generated_mnist.view(64, 1, 28, 28),
+                   'results_mnist/generated_samples.png')
+        print("Saved generated MNIST samples to 'results_mnist/generated_samples.png'")
+        
+        # Frey Face generated samples
+        z_dim_frey = 4
+        sample_z_frey = torch.randn(64, z_dim_frey).to(device)
+        generated_frey_mean, _ = model_frey.decode(sample_z_frey)
+        generated_frey = torch.clamp(generated_frey_mean, 0, 1).cpu()
+        save_image(generated_frey.view(64, 1, *img_shape),
+                   'results_freyface/generated_samples.png')
+        print("Saved generated Frey Face samples to 'results_freyface/generated_samples.png'")
 
 
 if __name__ == '__main__':
