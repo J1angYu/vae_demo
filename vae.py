@@ -9,13 +9,11 @@ from torchvision.utils import save_image
 from scipy.io import loadmat
 import matplotlib.pyplot as plt
 import math
-
-
 #### 2. 环境与参数设置
 # --- 参数配置 ---
 CONFIG = {
     "batch_size": 128, "epochs_mnist": 10, "epochs_frey": 250,
-    "lr": 1e-3, "seed": 1,
+    "lr": 1e-3, "seed": 1, "z_dim": 20,
 }
 
 # --- 环境设置 ---
@@ -24,12 +22,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 os.makedirs('results_mnist', exist_ok=True)
 os.makedirs('results_freyface', exist_ok=True)
 os.makedirs('models', exist_ok=True)
-
-
 #### 3. 模型与损失函数定义
 # --- VAE 模型定义 ---
 class VAE_Binary(nn.Module): # For MNIST
-    def __init__(self, z_dim=20):
+    def __init__(self, z_dim):
         super().__init__()
         self.encoder = nn.Sequential(nn.Linear(784, 400), nn.ReLU())
         self.fc_mu, self.fc_logvar = nn.Linear(400, z_dim), nn.Linear(400, z_dim)
@@ -50,15 +46,12 @@ class VAE_Binary(nn.Module): # For MNIST
         return self.decode(z), mu, logvar
 
 class VAE_Gaussian(nn.Module): # For Frey Face
-    def __init__(self, z_dim=20):
+    def __init__(self, z_dim):
         super().__init__()
         self.encoder = nn.Sequential(nn.Linear(560, 200), nn.ReLU())
         self.fc_mu, self.fc_logvar = nn.Linear(200, z_dim), nn.Linear(200, z_dim)
         self.decoder_shared = nn.Sequential(nn.Linear(z_dim, 200), nn.ReLU())
-        self.decoder_mean = nn.Sequential(
-            nn.Linear(200, 560),
-            nn.Sigmoid()
-        )
+        self.decoder_mean = nn.Sequential(nn.Linear(200, 560), nn.Sigmoid())
         self.decoder_logvar = nn.Linear(200, 560) 
 
     def reparameterize(self, mu, logvar):
@@ -91,8 +84,6 @@ def loss_function_gaussian(recon_x_mean, recon_x_logvar, x, mu, logvar, beta=1.0
     )
     KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return recon_loss + beta * KLD
-
-
 #### 4. MNIST 数据加载与训练
 # --- 数据加载 ---
 mnist_train_loader = DataLoader(
@@ -103,7 +94,7 @@ mnist_test_loader = DataLoader(
     batch_size=CONFIG['batch_size'], shuffle=True) # Shuffle for random sampling
 
 # --- 模型训练 ---
-model_mnist = VAE_Binary().to(device)
+model_mnist = VAE_Binary(z_dim=CONFIG['z_dim']).to(device)
 optimizer_mnist = optim.Adam(model_mnist.parameters(), lr=CONFIG['lr'])
 print("--- Training VAE on MNIST ---")
 for epoch in range(1, CONFIG['epochs_mnist'] + 1):
@@ -119,7 +110,6 @@ for epoch in range(1, CONFIG['epochs_mnist'] + 1):
 # --- 保存模型 ---
 torch.save(model_mnist.state_dict(), 'models/vae_mnist.pth')
 print("mnist VAE model saved to 'models/vae_mnist.pth'")
-
 #### 5. Frey Face 数据加载与训练
 # --- 数据加载 ---
 frey_faces = loadmat("frey_rawface.mat")["ff"].T.astype('float32') / 255.0
@@ -127,7 +117,7 @@ frey_dataset = TensorDataset(torch.from_numpy(frey_faces))
 frey_loader = DataLoader(frey_dataset, batch_size=CONFIG['batch_size'], shuffle=True)
 
 # --- 模型训练 ---
-model_frey = VAE_Gaussian().to(device)
+model_frey = VAE_Gaussian(z_dim=CONFIG['z_dim']).to(device)
 optimizer_frey = optim.Adam(model_frey.parameters(), lr=CONFIG['lr'])
 print("\n--- Training VAE on Frey Face ---")
 
@@ -149,8 +139,6 @@ for epoch in range(1, CONFIG['epochs_frey'] + 1):
 # --- 保存模型 ---
 torch.save(model_frey.state_dict(), 'models/vae_frey.pth')
 print("Frey Face VAE model saved to 'models/vae_frey.pth'")
-
-
 #### 6. 可视化
 model_mnist.eval()
 model_frey.eval()
@@ -190,17 +178,15 @@ plt.show()
 # visualizing generated samples
 with torch.no_grad():
     # MNIST generated samples
-    z_dim_mnist = 20
-    sample_z = torch.randn(64, z_dim_mnist).to(device)
+    sample_z = torch.randn(64, CONFIG['z_dim']).to(device)
     generated_mnist = model_mnist.decode(sample_z).cpu()
     save_image(generated_mnist.view(64, 1, 28, 28), 'results_mnist/generated_samples.png')
     print("Saved generated MNIST samples to 'results_mnist/generated_samples.png'")
     
     # Frey Face generated samples
-    z_dim_frey = 20
-    sample_z = torch.randn(64, z_dim_frey).to(device)
+    sample_z = torch.randn(64, CONFIG['z_dim']).to(device)
     # Use the mean of the decoded output for generating images and clamp for visualization
-    generated_frey = model_frey.decode(sample_z).cpu()
+    generated_frey = model_frey.decode(sample_z).cpu().clamp(0, 1)
     save_image(generated_frey.view(64, 1, 28, 20), 'results_freyface/generated_samples.png')
     print("Saved generated Frey Face samples to 'results_freyface/generated_samples.png'")
 
